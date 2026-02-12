@@ -19,6 +19,7 @@ transformers==5.1.0
 pandas==2.2.3
 scikit-learn==1.5.2
 plotly==6.5.2
+matplotlib==3.9.2
 PySide6==6.10.2
 tqdm==4.67.3
 requests==2.32.5

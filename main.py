@@ -1,12 +1,18 @@
 import csv
 import os
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from statistics import mean
 
+import librosa
+import librosa.display
+import soundfile as sf
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QValueAxis
 from PySide6.QtCore import QElapsedTimer, QSettings, Qt, QThread, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
@@ -45,6 +51,11 @@ from PySide6.QtWidgets import (
 
 from audio_analyzer import AudioAnalyzer, AudioWorker, ProfileManager
 from ui_theme import build_stylesheet
+
+try:
+    import noisereduce as nr
+except Exception:  # pragma: no cover - optional dependency fallback
+    nr = None
 
 
 APP_TITLE = "EcoAcoustic Sentinel"
@@ -128,13 +139,107 @@ class ExportOptionsDialog(QDialog):
         return self.zone_meta_check.isChecked()
 
 
+class SpectrogramWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.figure = Figure(figsize=(6, 2.8), tight_layout=True)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self._colorbar = None
+        layout.addWidget(self.canvas)
+        self.clear_plot()
+
+    def clear_plot(self, message: str = "Selecciona una deteccion para ver su espectrograma.") -> None:
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        ax.set_facecolor("#0f1117")
+        ax.text(
+            0.5,
+            0.5,
+            message,
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="#9aa0bb",
+            transform=ax.transAxes,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        self.canvas.draw_idle()
+
+    def plot_segment(
+        self,
+        audio_path: str,
+        *,
+        start_sec: float,
+        end_sec: float,
+        title: str = "",
+        use_noise_reduction: bool = False,
+    ) -> None:
+        duration = max(0.15, float(end_sec) - float(start_sec))
+        signal, sample_rate = librosa.load(
+            audio_path,
+            sr=None,
+            mono=True,
+            offset=max(0.0, float(start_sec)),
+            duration=duration,
+        )
+        if signal.size == 0:
+            self.clear_plot("No se pudo extraer audio para espectrograma.")
+            return
+
+        if use_noise_reduction and nr is not None:
+            signal = nr.reduce_noise(y=signal, sr=sample_rate, stationary=True, prop_decrease=0.9)
+
+        signal = signal.astype("float32", copy=False)
+        n_fft = 2048
+        hop_length = 256
+        mel_spec = librosa.feature.melspectrogram(
+            y=signal,
+            sr=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=128,
+            fmin=20,
+            fmax=min(20000, sample_rate // 2),
+            power=2.0,
+        )
+        ref_power = float(mel_spec.max()) if mel_spec.size else 1.0
+        if ref_power <= 0.0:
+            ref_power = 1e-6
+        mel_db = librosa.power_to_db(mel_spec, ref=ref_power)
+
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        img = librosa.display.specshow(
+            mel_db,
+            sr=sample_rate,
+            hop_length=hop_length,
+            x_axis="time",
+            y_axis="mel",
+            cmap="inferno",
+            ax=ax,
+        )
+        ax.set_xlabel("Tiempo (s)")
+        ax.set_ylabel("Frecuencia (Mel)")
+        ax.set_title(title or "Espectrograma de Mel")
+        self._colorbar = self.figure.colorbar(img, ax=ax, pad=0.01, format="%+2.0f dB")
+        self._colorbar.set_label("Intensidad (dB)")
+        self.canvas.draw_idle()
+
+
 class AudioAnalysisWindow(QMainWindow):
     DEFAULTS = {
         "overlap": 0.30,
         "sensitivity": 1.00,
         "min_conf": 0.75,
+        "anomaly_threshold": 0.45,
         "threads": max(1, (os.cpu_count() or 4) // 2),
         "use_multi_vector": True,
+        "use_noise_reduction": False,
         "smoothing_window": 3,
         "use_global_discovery": False,
     }
@@ -172,6 +277,7 @@ class AudioAnalysisWindow(QMainWindow):
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(0.75)
+        self._temp_playback_path: Path | None = None
 
         self._init_ui()
         self._load_settings()
@@ -419,6 +525,15 @@ class AudioAnalysisWindow(QMainWindow):
         self.min_conf_spin.setValue(0.75)
         self.min_conf_spin.setToolTip("Umbral de similitud coseno para confirmar especie personalizada.")
 
+        self.anomaly_threshold_spin = QDoubleSpinBox()
+        self.anomaly_threshold_spin.setDecimals(2)
+        self.anomaly_threshold_spin.setRange(0.05, 0.99)
+        self.anomaly_threshold_spin.setSingleStep(0.01)
+        self.anomaly_threshold_spin.setValue(0.45)
+        self.anomaly_threshold_spin.setToolTip(
+            "Umbral de confianza BirdNET para marcar eventos como anomalia acustica."
+        )
+
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(1, max(2, os.cpu_count() or 8))
         self.threads_spin.setToolTip("Hilos de CPU para analisis.")
@@ -426,6 +541,12 @@ class AudioAnalysisWindow(QMainWindow):
         self.multi_vector_check = QCheckBox("Modo Alta Precision (Multi-Vector)")
         self.multi_vector_check.setChecked(True)
         self.multi_vector_check.setToolTip("Compara cada chunk contra multiples prototipos por especie.")
+
+        self.noise_reduction_check = QCheckBox("Activar Reduccion de Ruido (DSP)")
+        self.noise_reduction_check.setChecked(False)
+        self.noise_reduction_check.setToolTip(
+            "Aplica noisereduce antes de extraer embeddings y en espectrograma/reproduccion."
+        )
 
         self.smoothing_window_spin = QSpinBox()
         self.smoothing_window_spin.setRange(1, 11)
@@ -460,12 +581,15 @@ class AudioAnalysisWindow(QMainWindow):
         grid.addWidget(self.multi_vector_check, 3, 0, 1, 2)
         grid.addWidget(QLabel("Ventana de Suavizado"), 3, 2)
         grid.addWidget(self.smoothing_window_spin, 3, 3)
-        grid.addWidget(self.discovery_mode_check, 4, 0, 1, 4)
+        grid.addWidget(self.noise_reduction_check, 4, 0, 1, 2)
+        grid.addWidget(QLabel("Umbral anomalia"), 4, 2)
+        grid.addWidget(self.anomaly_threshold_spin, 4, 3)
+        grid.addWidget(self.discovery_mode_check, 5, 0, 1, 4)
 
         tip = QLabel("Tip: para fauna densa usa 'Alta sensibilidad'; para precision usa 'Precision alta'.")
         tip.setObjectName("HintLabel")
         tip.setWordWrap(True)
-        grid.addWidget(tip, 5, 0, 1, 4)
+        grid.addWidget(tip, 6, 0, 1, 4)
         return tab
 
     def _build_step_export(self) -> QWidget:
@@ -599,8 +723,16 @@ class AudioAnalysisWindow(QMainWindow):
         self.detections_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.detections_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.detections_table.customContextMenuRequested.connect(self._show_detections_context_menu)
+        self.detections_table.itemSelectionChanged.connect(self._on_detection_selection_changed)
 
-        layout.addWidget(self.detections_table)
+        self.spectrogram_widget = SpectrogramWidget()
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self.detections_table)
+        splitter.addWidget(self.spectrogram_widget)
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([300, 220])
+
+        layout.addWidget(splitter)
         return tab
 
     def _build_species_library_tab(self) -> QWidget:
@@ -698,8 +830,10 @@ class AudioAnalysisWindow(QMainWindow):
         QWidget.setTabOrder(self.sensitivity_spin, self.min_conf_spin)
         QWidget.setTabOrder(self.min_conf_spin, self.threads_spin)
         QWidget.setTabOrder(self.threads_spin, self.multi_vector_check)
-        QWidget.setTabOrder(self.multi_vector_check, self.smoothing_window_spin)
-        QWidget.setTabOrder(self.smoothing_window_spin, self.discovery_mode_check)
+        QWidget.setTabOrder(self.multi_vector_check, self.noise_reduction_check)
+        QWidget.setTabOrder(self.noise_reduction_check, self.smoothing_window_spin)
+        QWidget.setTabOrder(self.smoothing_window_spin, self.anomaly_threshold_spin)
+        QWidget.setTabOrder(self.anomaly_threshold_spin, self.discovery_mode_check)
         QWidget.setTabOrder(self.discovery_mode_check, self.run_btn)
 
     def _browse_input_file(self) -> None:
@@ -836,6 +970,8 @@ class AudioAnalysisWindow(QMainWindow):
         self.min_conf_spin.setValue(self.DEFAULTS["min_conf"])
         self.threads_spin.setValue(self.DEFAULTS["threads"])
         self.multi_vector_check.setChecked(bool(self.DEFAULTS["use_multi_vector"]))
+        self.noise_reduction_check.setChecked(bool(self.DEFAULTS["use_noise_reduction"]))
+        self.anomaly_threshold_spin.setValue(float(self.DEFAULTS["anomaly_threshold"]))
         self.smoothing_window_spin.setValue(int(self.DEFAULTS["smoothing_window"]))
         self.discovery_mode_check.setChecked(bool(self.DEFAULTS["use_global_discovery"]))
         self.preset_combo.setCurrentText("Balanceado")
@@ -1014,6 +1150,8 @@ class AudioAnalysisWindow(QMainWindow):
         self.audio_analyzer.overlap_seconds = self.overlap_spin.value()
         self.audio_analyzer.threads = self.threads_spin.value()
         self.audio_analyzer.similarity_threshold = self.min_conf_spin.value()
+        self.audio_analyzer.anomaly_threshold = self.anomaly_threshold_spin.value()
+        self.audio_analyzer.use_noise_reduction = self.noise_reduction_check.isChecked()
 
         self.total_files = 1
         self.processed_files = 0
@@ -1044,8 +1182,10 @@ class AudioAnalysisWindow(QMainWindow):
             self.export_options.formats,
             zone_metadata=zone_meta,
             similarity_threshold=self.min_conf_spin.value(),
+            anomaly_threshold=self.anomaly_threshold_spin.value(),
             overlap_seconds=self.overlap_spin.value(),
             threads=self.threads_spin.value(),
+            use_noise_reduction=self.noise_reduction_check.isChecked(),
             use_multi_vector=self.multi_vector_check.isChecked(),
             smoothing_window=self.smoothing_window_spin.value(),
             use_global_discovery=self.discovery_mode_check.isChecked(),
@@ -1186,12 +1326,69 @@ class AudioAnalysisWindow(QMainWindow):
         except Exception:
             return 0.0
 
+    def _row_payload_from_table(self, row_index: int) -> dict | None:
+        if row_index < 0:
+            return None
+        first_item = self.detections_table.item(row_index, 0)
+        if first_item is not None:
+            payload = first_item.data(Qt.UserRole)
+            if isinstance(payload, dict):
+                return dict(payload)
+
+        common_item = self.detections_table.item(row_index, 2)
+        scientific_item = self.detections_table.item(row_index, 3)
+        file_item = self.detections_table.item(row_index, 5)
+        return {
+            "start": self._safe_float(self.detections_table.item(row_index, 0).text() if self.detections_table.item(row_index, 0) else "0"),
+            "end": self._safe_float(self.detections_table.item(row_index, 1).text() if self.detections_table.item(row_index, 1) else "0"),
+            "common": common_item.text() if common_item else "N/A",
+            "scientific": scientific_item.text() if scientific_item else "N/A",
+            "confidence": self._safe_float(self.detections_table.item(row_index, 4).text() if self.detections_table.item(row_index, 4) else "0"),
+            "file": file_item.text() if file_item else "",
+            "source": "custom",
+        }
+
+    def _on_detection_selection_changed(self) -> None:
+        if not hasattr(self, "spectrogram_widget"):
+            return
+        row = self.detections_table.currentRow()
+        payload = self._row_payload_from_table(row)
+        if not payload:
+            self.spectrogram_widget.clear_plot()
+            return
+        self._update_spectrogram_for_payload(payload)
+
+    def _update_spectrogram_for_payload(self, row_payload: dict) -> None:
+        audio_path = str(row_payload.get("file", "")).strip()
+        if not audio_path or not Path(audio_path).exists():
+            self.spectrogram_widget.clear_plot("Audio no disponible para espectrograma.")
+            return
+
+        start = max(0.0, float(row_payload.get("start", 0.0)))
+        end = max(start + 0.15, float(row_payload.get("end", start + 0.25)))
+        common = str(row_payload.get("common", "N/A"))
+        scientific = str(row_payload.get("scientific", "N/A"))
+        source = str(row_payload.get("source", "custom")).lower()
+        title = f"{common} | {scientific} | {source}"
+        try:
+            self.spectrogram_widget.plot_segment(
+                audio_path,
+                start_sec=start,
+                end_sec=end,
+                title=title,
+                use_noise_reduction=self.noise_reduction_check.isChecked(),
+            )
+        except Exception as ex:
+            self.spectrogram_widget.clear_plot("No se pudo generar espectrograma.")
+            self._add_log("Warning", f"Error al renderizar espectrograma: {ex}")
+
     def _populate_detections_table(self, rows: list[dict]) -> None:
         self.detections_table.setRowCount(0)
         for idx, row in enumerate(rows):
             self.detections_table.insertRow(idx)
             source = str(row.get("source", "custom")).strip().lower()
             is_global = source == "birdnet_global"
+            is_anomaly = source == "anomaly"
             common_label = row["common"]
             if is_global:
                 common_label = f"{common_label} (Global)"
@@ -1209,40 +1406,77 @@ class AudioAnalysisWindow(QMainWindow):
                     item.setForeground(QColor("#1D4ED8"))
                     item.setBackground(QColor("#EEF4FF"))
                     item.setToolTip("Deteccion obtenida por BirdNET global.")
+                elif is_anomaly:
+                    item.setForeground(QColor("#92400E"))
+                    item.setBackground(QColor("#FFF7E6"))
+                    item.setToolTip("Evento biologico no reconocido por perfiles locales (anomalia).")
+                else:
+                    item.setForeground(QColor("#14532D"))
+                    item.setBackground(QColor("#ECFDF3"))
+                    item.setToolTip("Especie conocida por perfiles locales.")
+                if col == 0:
+                    item.setData(Qt.UserRole, dict(row))
                 self.detections_table.setItem(idx, col, item)
 
             play_btn = QPushButton("Reproducir")
             exists = Path(row["file"]).exists() if row["file"] else False
             play_btn.setEnabled(exists)
-            play_btn.clicked.connect(partial(self._play_segment, row))
+            play_btn.clicked.connect(partial(self._play_segment, dict(row)))
             self.detections_table.setCellWidget(idx, 6, play_btn)
+
+        if rows:
+            self.detections_table.selectRow(0)
+            self._on_detection_selection_changed()
+        elif hasattr(self, "spectrogram_widget"):
+            self.spectrogram_widget.clear_plot()
 
     def _show_detections_context_menu(self, pos) -> None:
         row = self.detections_table.rowAt(pos.y())
         if row < 0:
             return
         self.detections_table.selectRow(row)
+        row_payload = self._row_payload_from_table(row)
+        if not row_payload:
+            return
 
         menu = QMenu(self)
-        refine_action = menu.addAction("Anadir este audio al perfil de la especie")
+        source = str(row_payload.get("source", "custom")).lower()
+        if source == "anomaly":
+            refine_action = menu.addAction("Crear/actualizar perfil desde anomalia")
+        else:
+            refine_action = menu.addAction("Anadir este audio al perfil de la especie")
         chosen = menu.exec(self.detections_table.viewport().mapToGlobal(pos))
         if chosen == refine_action:
-            self._refine_profile_from_detection(row)
+            self._refine_profile_from_detection(row, row_payload=row_payload)
 
-    def _refine_profile_from_detection(self, row: int) -> None:
+    def _refine_profile_from_detection(self, row: int, *, row_payload: dict | None = None) -> None:
         species_item = self.detections_table.item(row, 2)
         scientific_item = self.detections_table.item(row, 3)
         file_item = self.detections_table.item(row, 5)
         start_item = self.detections_table.item(row, 0)
         end_item = self.detections_table.item(row, 1)
 
+        payload = row_payload or self._row_payload_from_table(row) or {}
+        source = str(payload.get("source", "custom")).lower()
         species = species_item.text().strip() if species_item else ""
         if not species and scientific_item:
             species = scientific_item.text().strip()
         species = species.replace(" (Global)", "").strip()
-        audio_file = file_item.text().strip() if file_item else ""
-        start_sec = self._safe_float(start_item.text().strip()) if start_item else 0.0
-        end_sec = self._safe_float(end_item.text().strip()) if end_item else 0.0
+        audio_file = str(payload.get("file", "")).strip() or (file_item.text().strip() if file_item else "")
+        start_sec = float(payload.get("start", 0.0)) if payload else (self._safe_float(start_item.text().strip()) if start_item else 0.0)
+        end_sec = float(payload.get("end", 0.0)) if payload else (self._safe_float(end_item.text().strip()) if end_item else 0.0)
+
+        if source == "anomaly":
+            suggested = str(payload.get("birdnet_common", "")).strip() or str(payload.get("birdnet_scientific", "")).strip()
+            species_input, ok = QInputDialog.getText(
+                self,
+                "Asignar nombre para anomalia",
+                "Nombre de especie/perfil para esta anomalia:",
+                text=suggested,
+            )
+            if not ok:
+                return
+            species = species_input.strip()
 
         if not species:
             QMessageBox.warning(self, "Especie no valida", "La fila seleccionada no tiene especie.")
@@ -1294,6 +1528,16 @@ class AudioAnalysisWindow(QMainWindow):
         finally:
             self._refresh_profile_library()
 
+    def _cleanup_temp_playback(self) -> None:
+        if self._temp_playback_path is None:
+            return
+        try:
+            if self._temp_playback_path.exists():
+                self._temp_playback_path.unlink()
+        except Exception:
+            pass
+        self._temp_playback_path = None
+
     def _play_segment(self, row: dict) -> None:
         audio_file = row.get("file", "")
         if not audio_file or not Path(audio_file).exists():
@@ -1302,11 +1546,40 @@ class AudioAnalysisWindow(QMainWindow):
 
         start = max(0.0, float(row.get("start", 0.0)))
         end = max(start + 0.5, float(row.get("end", start + 1.0)))
-        duration_ms = int((end - start) * 1000)
+        play_source = str(audio_file)
+        play_start = start
+        play_duration = max(0.2, end - start)
+
+        self._update_spectrogram_for_payload(row)
+
+        if self.noise_reduction_check.isChecked() and nr is not None:
+            try:
+                signal, sample_rate = librosa.load(
+                    str(audio_file),
+                    sr=None,
+                    mono=True,
+                    offset=start,
+                    duration=play_duration,
+                )
+                if signal.size > 0:
+                    cleaned = nr.reduce_noise(y=signal, sr=sample_rate, stationary=True, prop_decrease=0.9)
+                    self._cleanup_temp_playback()
+                    fd, tmp_name = tempfile.mkstemp(prefix="ecoacoustic_play_", suffix=".wav")
+                    os.close(fd)
+                    self._temp_playback_path = Path(tmp_name)
+                    sf.write(str(self._temp_playback_path), cleaned.astype("float32"), sample_rate)
+                    play_source = str(self._temp_playback_path)
+                    play_start = 0.0
+            except Exception as ex:
+                self._add_log("Warning", f"No se pudo aplicar reduccion de ruido en reproduccion: {ex}")
+        else:
+            self._cleanup_temp_playback()
+
+        duration_ms = int(play_duration * 1000)
 
         self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(audio_file))
-        self.player.setPosition(int(start * 1000))
+        self.player.setSource(QUrl.fromLocalFile(play_source))
+        self.player.setPosition(int(play_start * 1000))
         self.player.play()
         QTimer.singleShot(duration_ms, self.player.stop)
 
@@ -1384,6 +1657,8 @@ class AudioAnalysisWindow(QMainWindow):
     def _clear_results_view(self) -> None:
         self.summary_headline.setText("Sin resultados aun.")
         self.detections_table.setRowCount(0)
+        if hasattr(self, "spectrogram_widget"):
+            self.spectrogram_widget.clear_plot()
         self.top_species_table.setRowCount(0)
         self.metric_detections.setText("0")
         self.metric_species.setText("0")
@@ -1457,8 +1732,14 @@ class AudioAnalysisWindow(QMainWindow):
         self.overlap_spin.setValue(float(self.settings.value("overlap", self.DEFAULTS["overlap"])))
         self.sensitivity_spin.setValue(float(self.settings.value("sensitivity", self.DEFAULTS["sensitivity"])))
         self.min_conf_spin.setValue(float(self.settings.value("min_conf", self.DEFAULTS["min_conf"])))
+        self.anomaly_threshold_spin.setValue(
+            float(self.settings.value("anomaly_threshold", self.DEFAULTS["anomaly_threshold"]))
+        )
         self.threads_spin.setValue(int(self.settings.value("threads", self.DEFAULTS["threads"])))
         self.multi_vector_check.setChecked(self.settings.value("use_multi_vector", self.DEFAULTS["use_multi_vector"], type=bool))
+        self.noise_reduction_check.setChecked(
+            self.settings.value("use_noise_reduction", self.DEFAULTS["use_noise_reduction"], type=bool)
+        )
         self.smoothing_window_spin.setValue(
             int(self.settings.value("smoothing_window", self.DEFAULTS["smoothing_window"]))
         )
@@ -1487,12 +1768,15 @@ class AudioAnalysisWindow(QMainWindow):
         self.settings.setValue("overlap", self.overlap_spin.value())
         self.settings.setValue("sensitivity", self.sensitivity_spin.value())
         self.settings.setValue("min_conf", self.min_conf_spin.value())
+        self.settings.setValue("anomaly_threshold", self.anomaly_threshold_spin.value())
         self.settings.setValue("threads", self.threads_spin.value())
         self.settings.setValue("use_multi_vector", self.multi_vector_check.isChecked())
+        self.settings.setValue("use_noise_reduction", self.noise_reduction_check.isChecked())
         self.settings.setValue("smoothing_window", self.smoothing_window_spin.value())
         self.settings.setValue("use_global_discovery", self.discovery_mode_check.isChecked())
         self.settings.setValue("export_formats", ",".join(self.export_options.formats))
         self.settings.setValue("include_zone_metadata", self.export_options.include_zone_metadata)
+        self._cleanup_temp_playback()
         super().closeEvent(event)
 
 

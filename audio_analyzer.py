@@ -1,5 +1,6 @@
 import csv
 import json
+import logging
 import math
 import re
 import subprocess
@@ -21,8 +22,15 @@ from birdnet_analyzer import analyze as birdnet_run
 from birdnet_analyzer.analyze.utils import iterate_audio_chunks
 from birdnet_analyzer.utils import ensure_model_exists
 
+try:
+    import noisereduce as nr
+except Exception:  # pragma: no cover - optional dependency fallback
+    nr = None
+
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".wma", ".aiff", ".aif"}
+ANOMALY_COMMON_LABEL = "Anomalia Acustica / Posible Nueva Especie"
+log = logging.getLogger(__name__)
 
 
 def _l2_normalize(vector: np.ndarray) -> np.ndarray:
@@ -225,17 +233,21 @@ class AudioAnalyzer:
         self,
         profile_manager: ProfileManager,
         similarity_threshold: float = 0.75,
+        anomaly_threshold: float = 0.45,
         overlap_seconds: float = 0.3,
         chunk_seconds: float = 3.0,
         batch_size: int = 1,
         threads: int = 4,
+        use_noise_reduction: bool = False,
     ) -> None:
         self.profile_manager = profile_manager
         self.similarity_threshold = float(similarity_threshold)
+        self.anomaly_threshold = float(anomaly_threshold)
         self.overlap_seconds = float(overlap_seconds)
         self.chunk_seconds = float(chunk_seconds)
         self.batch_size = int(batch_size)
         self.threads = int(threads)
+        self.use_noise_reduction = bool(use_noise_reduction)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cosine = torch.nn.CosineSimilarity(dim=1)
         ensure_model_exists()
@@ -285,13 +297,55 @@ class AudioAnalyzer:
             total += segments
         return max(total, 1)
 
+    def _reduce_noise(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        arr = np.asarray(audio, dtype=np.float32)
+        if nr is None:
+            return arr
+
+        if arr.ndim == 1:
+            cleaned = nr.reduce_noise(y=arr, sr=sample_rate, stationary=True, prop_decrease=0.9)
+            return np.asarray(cleaned, dtype=np.float32)
+
+        if arr.ndim == 2:
+            cleaned_channels = []
+            for ch in range(arr.shape[1]):
+                cleaned_ch = nr.reduce_noise(y=arr[:, ch], sr=sample_rate, stationary=True, prop_decrease=0.9)
+                cleaned_channels.append(np.asarray(cleaned_ch, dtype=np.float32))
+            return np.stack(cleaned_channels, axis=1).astype(np.float32)
+
+        return arr
+
+    def _prepare_file_for_embeddings(self, file_path: Path) -> tuple[Path, TemporaryDirectory | None]:
+        if not self.use_noise_reduction:
+            return file_path, None
+
+        if nr is None:
+            log.warning("Noise reduction requested but noisereduce is unavailable. Using raw audio.")
+            return file_path, None
+
+        tmp_dir = TemporaryDirectory(prefix="ecoacoustic_nr_")
+        try:
+            audio, sample_rate = sf.read(str(file_path), always_2d=False)
+            cleaned = self._reduce_noise(np.asarray(audio), int(sample_rate))
+            denoised_path = Path(tmp_dir.name) / f"{file_path.stem}_nr.wav"
+            sf.write(str(denoised_path), cleaned, int(sample_rate))
+            return denoised_path, tmp_dir
+        except Exception:
+            tmp_dir.cleanup()
+            raise
+
     def _extract_file_embeddings(self, file_path: Path):
-        self._configure_birdnet(str(file_path))
-        for start, end, emb in iterate_audio_chunks(str(file_path), embeddings=True):
-            vec = np.asarray(emb, dtype=np.float32).reshape(-1)
-            if np.linalg.norm(vec) <= 1e-12:
-                continue
-            yield float(start), float(end), _l2_normalize(vec)
+        prepared_path, tmp_dir = self._prepare_file_for_embeddings(file_path)
+        try:
+            self._configure_birdnet(str(prepared_path))
+            for start, end, emb in iterate_audio_chunks(str(prepared_path), embeddings=True):
+                vec = np.asarray(emb, dtype=np.float32).reshape(-1)
+                if np.linalg.norm(vec) <= 1e-12:
+                    continue
+                yield float(start), float(end), _l2_normalize(vec)
+        finally:
+            if tmp_dir is not None:
+                tmp_dir.cleanup()
 
     def _cluster_profile_vectors(
         self,
@@ -588,28 +642,33 @@ class AudioAnalyzer:
         longitude: float | None = None,
         log_callback: Callable[[str, str], None] | None = None,
     ) -> list[dict]:
-        with TemporaryDirectory(prefix="ecoacoustic_global_") as tmp:
-            out_dir = Path(tmp)
-            self._configure_birdnet(str(file_path))
-            cfg.OUTPUT_PATH = str(out_dir)
-            cfg.RESULT_TYPES = ["csv"]
-            if latitude is not None and longitude is not None:
-                cfg.LATITUDE = float(latitude)
-                cfg.LONGITUDE = float(longitude)
-            else:
-                cfg.LATITUDE = None
-                cfg.LONGITUDE = None
+        prepared_path, tmp_nr = self._prepare_file_for_embeddings(file_path)
+        try:
+            with TemporaryDirectory(prefix="ecoacoustic_global_") as tmp:
+                out_dir = Path(tmp)
+                self._configure_birdnet(str(prepared_path))
+                cfg.OUTPUT_PATH = str(out_dir)
+                cfg.RESULT_TYPES = ["csv"]
+                if latitude is not None and longitude is not None:
+                    cfg.LATITUDE = float(latitude)
+                    cfg.LONGITUDE = float(longitude)
+                else:
+                    cfg.LATITUDE = None
+                    cfg.LONGITUDE = None
 
-            self._invoke_birdnet_module(file_path, out_dir, log_callback=log_callback)
+                self._invoke_birdnet_module(prepared_path, out_dir, log_callback=log_callback)
 
-            csv_paths = sorted(out_dir.rglob("*.BirdNET.results.csv"))
-            if not csv_paths:
-                csv_paths = sorted(out_dir.rglob("*.csv"))
+                csv_paths = sorted(out_dir.rglob("*.BirdNET.results.csv"))
+                if not csv_paths:
+                    csv_paths = sorted(out_dir.rglob("*.csv"))
 
-            detections: list[dict] = []
-            for csv_path in csv_paths:
-                detections.extend(self._parse_global_csv(csv_path, default_file=str(file_path)))
-            return detections
+                detections: list[dict] = []
+                for csv_path in csv_paths:
+                    detections.extend(self._parse_global_csv(csv_path, default_file=str(file_path)))
+                return detections
+        finally:
+            if tmp_nr is not None:
+                tmp_nr.cleanup()
 
     def _is_time_overlap(self, a: dict, b: dict, *, min_overlap: float = 0.0) -> bool:
         if str(a.get("file", "")) != str(b.get("file", "")):
@@ -632,11 +691,70 @@ class AudioAnalyzer:
         merged.sort(key=lambda x: (x.get("file", ""), x.get("start", 0.0), x.get("end", 0.0)))
         return merged
 
+    def _build_anomaly_rows(
+        self,
+        global_rows: list[dict],
+        final_custom_rows: list[dict],
+        *,
+        anomaly_threshold: float,
+    ) -> list[dict]:
+        anomalies: list[dict] = []
+        for row in global_rows:
+            conf = float(row.get("confidence", 0.0))
+            if conf < anomaly_threshold:
+                continue
+            if any(self._is_time_overlap(row, known, min_overlap=0.05) for known in final_custom_rows):
+                continue
+
+            anomalies.append(
+                {
+                    "start": float(row.get("start", 0.0)),
+                    "end": float(row.get("end", 0.0)),
+                    "scientific": row.get("scientific", "Unknown") or "Unknown",
+                    "common": ANOMALY_COMMON_LABEL,
+                    "confidence": conf,
+                    "file": row.get("file", ""),
+                    "source": "anomaly",
+                    "birdnet_common": row.get("common", ""),
+                    "birdnet_scientific": row.get("scientific", ""),
+                }
+            )
+        anomalies.sort(key=lambda x: (x.get("file", ""), x.get("start", 0.0), x.get("end", 0.0)))
+        return anomalies
+
+    def _compose_final_detections(
+        self,
+        final_custom_rows: list[dict],
+        global_rows: list[dict],
+        *,
+        has_custom_profiles: bool,
+        use_global_discovery: bool,
+        anomaly_threshold: float,
+    ) -> list[dict]:
+        if not use_global_discovery:
+            out = list(final_custom_rows)
+            out.sort(key=lambda x: (x.get("file", ""), x.get("start", 0.0), x.get("end", 0.0)))
+            return out
+
+        if not has_custom_profiles:
+            return self._merge_custom_and_global(final_custom_rows, global_rows)
+
+        anomalies = self._build_anomaly_rows(
+            global_rows,
+            final_custom_rows,
+            anomaly_threshold=anomaly_threshold,
+        )
+        merged = list(final_custom_rows) + anomalies
+        merged.sort(key=lambda x: (x.get("file", ""), x.get("start", 0.0), x.get("end", 0.0)))
+        return merged
+
     def analyze(
         self,
         input_path: str,
         *,
         similarity_threshold: float | None = None,
+        anomaly_threshold: float | None = None,
+        use_noise_reduction: bool | None = None,
         use_multi_vector: bool = True,
         smoothing_window: int = 3,
         use_global_discovery: bool = False,
@@ -647,6 +765,10 @@ class AudioAnalyzer:
         should_stop: Callable[[], bool] | None = None,
     ) -> tuple[list[dict], dict]:
         threshold = float(similarity_threshold if similarity_threshold is not None else self.similarity_threshold)
+        anomaly_th = float(anomaly_threshold if anomaly_threshold is not None else self.anomaly_threshold)
+        anomaly_th = max(0.01, min(0.99, anomaly_th))
+        if use_noise_reduction is not None:
+            self.use_noise_reduction = bool(use_noise_reduction)
         profile_vectors = self.profile_manager.load_profile_vectors()
         has_custom_profiles = bool(profile_vectors)
         if not has_custom_profiles and not use_global_discovery:
@@ -655,6 +777,8 @@ class AudioAnalyzer:
         files = self._collect_audio_files(input_path)
         if not files:
             raise ValueError("No hay archivos de audio validos para analizar.")
+        if self.use_noise_reduction and log_callback:
+            log_callback("Info", "Reduccion de ruido DSP activada para extraccion y descubrimiento global.")
 
         total_segments = self._estimate_total_segments(files) if has_custom_profiles else max(len(files), 1)
         processed = 0
@@ -674,8 +798,13 @@ class AudioAnalyzer:
                     if should_stop and should_stop():
                         smoothed = self._apply_temporal_smoothing(candidates, window_size=smoothing_window, threshold=threshold)
                         final = [d for d in smoothed if float(d["confidence"]) >= threshold]
-                        if use_global_discovery:
-                            final = self._merge_custom_and_global(final, global_candidates)
+                        final = self._compose_final_detections(
+                            final,
+                            global_candidates,
+                            has_custom_profiles=has_custom_profiles,
+                            use_global_discovery=use_global_discovery,
+                            anomaly_threshold=anomaly_th,
+                        )
                         summary = {
                             "processed_segments": processed,
                             "total_segments": total_segments,
@@ -717,31 +846,25 @@ class AudioAnalyzer:
                 if should_stop and should_stop():
                     stopped_by_user = True
                     break
-                should_run_global = (not has_custom_profiles) or (file_custom_hits == 0)
-                if should_run_global:
-                    if log_callback:
-                        if has_custom_profiles:
-                            log_callback(
-                                "Info",
-                                f"Sin hits custom en {file_path.name} (max={file_best_custom_conf:.3f}). Activando BirdNET global.",
-                            )
-                        else:
-                            log_callback("Info", f"Descubrimiento global BirdNET: {file_path.name}")
+                if log_callback:
+                    if has_custom_profiles:
+                        log_callback(
+                            "Info",
+                            f"BirdNET global/anomalias en {file_path.name} "
+                            f"(hits custom={file_custom_hits}, max={file_best_custom_conf:.3f}).",
+                        )
+                    else:
+                        log_callback("Info", f"Descubrimiento global BirdNET: {file_path.name}")
 
-                    global_rows = self._run_global_discovery_for_file(
-                        file_path,
-                        latitude=latitude,
-                        longitude=longitude,
-                        log_callback=log_callback,
-                    )
-                    global_candidates.extend(global_rows)
-                    if log_callback:
-                        log_callback("Info", f"Detecciones globales ({file_path.name}): {len(global_rows)}")
-                elif log_callback:
-                    log_callback(
-                        "Info",
-                        f"Saltando BirdNET global en {file_path.name}: {file_custom_hits} hits custom >= {threshold:.2f}.",
-                    )
+                global_rows = self._run_global_discovery_for_file(
+                    file_path,
+                    latitude=latitude,
+                    longitude=longitude,
+                    log_callback=log_callback,
+                )
+                global_candidates.extend(global_rows)
+                if log_callback:
+                    log_callback("Info", f"Detecciones globales ({file_path.name}): {len(global_rows)}")
 
                 if not has_custom_profiles and progress_callback:
                     processed += 1
@@ -750,7 +873,13 @@ class AudioAnalyzer:
 
         smoothed = self._apply_temporal_smoothing(candidates, window_size=smoothing_window, threshold=threshold) if has_custom_profiles else []
         final_custom = [d for d in smoothed if float(d["confidence"]) >= threshold]
-        final_detections = self._merge_custom_and_global(final_custom, global_candidates) if use_global_discovery else final_custom
+        final_detections = self._compose_final_detections(
+            final_custom,
+            global_candidates,
+            has_custom_profiles=has_custom_profiles,
+            use_global_discovery=use_global_discovery,
+            anomaly_threshold=anomaly_th,
+        )
         processed_summary = processed if has_custom_profiles else total_segments
 
         summary = {
@@ -869,8 +998,10 @@ class AudioWorker(QObject):
         *,
         zone_metadata: dict | None = None,
         similarity_threshold: float | None = None,
+        anomaly_threshold: float | None = None,
         overlap_seconds: float | None = None,
         threads: int | None = None,
+        use_noise_reduction: bool = False,
         use_multi_vector: bool = True,
         smoothing_window: int = 3,
         use_global_discovery: bool = False,
@@ -884,8 +1015,10 @@ class AudioWorker(QObject):
         self.export_formats = export_formats
         self.zone_metadata = zone_metadata
         self.similarity_threshold = similarity_threshold
+        self.anomaly_threshold = anomaly_threshold
         self.overlap_seconds = overlap_seconds
         self.threads = threads
+        self.use_noise_reduction = bool(use_noise_reduction)
         self.use_multi_vector = bool(use_multi_vector)
         self.smoothing_window = int(smoothing_window)
         self.use_global_discovery = bool(use_global_discovery)
@@ -910,6 +1043,8 @@ class AudioWorker(QObject):
             detections, summary = self.analyzer.analyze(
                 self.input_path,
                 similarity_threshold=self.similarity_threshold,
+                anomaly_threshold=self.anomaly_threshold,
+                use_noise_reduction=self.use_noise_reduction,
                 use_multi_vector=self.use_multi_vector,
                 smoothing_window=self.smoothing_window,
                 use_global_discovery=self.use_global_discovery,

@@ -1,32 +1,63 @@
-﻿# EcoAcoustic Sentinel (Online Ready)
+﻿# EcoAcoustic Sentinel
 
-Aplicacion de escritorio para monitoreo bioacustico aviar con arquitectura hibrida:
-- Motor custom (Few-Shot por embeddings)
-- Motor de descubrimiento global (BirdNET)
+Desktop application for bird bioacoustic monitoring with a hybrid detection pipeline:
+- Custom species library (few-shot embeddings)
+- Global discovery with BirdNET
 
-Este paquete esta preparado para publicarse en GitHub y ser inicializado por CMD.
+This repository is prepared for direct use from GitHub on Windows.
 
-## Requisitos
+## Main Features
 
-- Windows 10/11
-- Python 3.11.x (obligatorio)
-- Conexion a internet para la instalacion inicial
+- Guided 4-step workflow in UI:
+  1. Audio input/output
+  2. Recording zone
+  3. Detection parameters
+  4. Export formats
+- Hybrid detection strategy:
+  - If custom profiles produce valid hits, those results are prioritized.
+  - If no custom hit is found, BirdNET global discovery can be used.
+- Species profile library:
+  - Create/remove local species profiles from reference audio.
+  - Multi-vector matching for higher precision.
+- Results and monitoring:
+  - Real-time progress and logs.
+  - Summary tab with top species and chart.
+  - Detailed detections table with playback support.
+- Multiple export formats:
+  - CSV
+  - Raven Table
+  - Audacity
+  - Kaleidoscope
 
-## Inicio rapido (1 comando)
+## Tech Stack
 
-Desde CMD o PowerShell en la raiz del proyecto:
+- UI: `PySide6`
+- Bioacoustics/ML: `birdnet-analyzer`, `PyTorch`, `TensorFlow`, `torchaudio`
+- Data processing: `numpy`, `pandas`, `scikit-learn`
+
+## Requirements
+
+- OS: Windows 10/11
+- Python: **3.11.x** (required)
+- Internet connection for first-time dependency/model setup
+
+## Install and Run (Quick Start)
+
+From PowerShell or CMD:
 
 ```bat
+git clone https://github.com/Guivve-A/Eco_radar.git
+cd Eco_radar
 start_app.bat
 ```
 
-El script hace automaticamente:
-1. crea/actualiza `venv` si no existe,
-2. instala dependencias (`setup_env.bat`),
-3. ejecuta `test_install.py`,
-4. abre la aplicacion (`main.py`).
+`start_app.bat` automatically:
+1. Creates/reuses `venv`
+2. Runs environment setup
+3. Executes a smoke test (`test_install.py`)
+4. Launches the application (`main.py`)
 
-## Instalacion manual (si prefieres controlar cada paso)
+## Manual Setup
 
 ```bat
 setup_env.bat
@@ -35,49 +66,67 @@ python test_install.py
 python main.py
 ```
 
-## Publicacion en GitHub (maintainer)
+## Optional GPU Setup
 
-```bat
-git init
-git add .
-git commit -m "Initial release: EcoAcoustic Sentinel online"
-```
+The default setup is CPU-first.
+If you need a GPU build for PyTorch, adjust your environment and install from `requirements-gpu.txt` according to your CUDA setup.
 
-Sugerencia:
-- Mantener `profiles/.gitkeep` y `output/.gitkeep` para versionar estructura vacia.
-- No subir `venv`, `dist`, `build`, ni resultados de usuario.
+## Typical Workflow
 
-## Empaquetado ejecutable (.exe)
+1. Select one audio file or a folder of audio files.
+2. Select output folder.
+3. Configure location mode:
+   - Global mode (no location), or
+   - Zone mode (lat/lon and optional metadata)
+4. Tune parameters/preset.
+5. Configure export formats.
+6. Start analysis.
+7. Review results in `Summary`, `Detections`, `Species Library`, and `Logs`.
 
-### Build app
+## Output and Local Data
+
+- `output/`: generated analysis results and exports
+- `profiles/`: local species embeddings and profile metadata
+
+The repository keeps folder structure with `.gitkeep` files; user-generated artifacts should stay local.
+
+## Build Executable
+
+### Build app (`onedir`)
+
 ```bat
 python build_exe.py
 ```
 
-### Build instalador
-1. Instalar Inno Setup 6
-2. Ejecutar:
+### Build installer
+
+1. Install Inno Setup 6
+2. Run:
+
 ```bat
 build_installer.bat
 ```
 
-El instalador final queda en `dist\EcoAcousticSentinel_Installer_x64.exe`.
+Expected installer output:
+`dist\EcoAcousticSentinel_Installer_x64.exe`
 
-## Arquitectura tecnica
+## Troubleshooting
 
-- UI: PySide6
-- Audio/ML: BirdNET + PyTorch/Torchaudio + TensorFlow
-- Clustering: Scikit-Learn (KMeans/MiniBatchKMeans)
-- Logica hibrida optimizada:
-  - Si hay detecciones custom sobre umbral, se omite BirdNET global para ese archivo.
-  - Si no hay hits custom, se activa descubrimiento global.
+- Error: Python version not supported
+  - Install Python 3.11.x and rerun `setup_env.bat`.
+- Error during first install
+  - Ensure internet access and rerun `setup_env.bat`.
+- App opens but no detections
+  - Check input path, supported audio formats, threshold settings, and zone/global mode.
+- Local run does not change GitHub
+  - Local execution affects only your machine unless you explicitly `git add`, `git commit`, and `git push`.
 
-## Credito cientifico
+## Scientific Credit
 
 BirdNET (Kahl et al., 2021):
 BirdNET: A deep learning solution for avian diversity monitoring.
 Ecological Informatics, 61, 101236.
 
-## Licencia
+## License
 
-MIT. Ver archivo LICENSE.
+MIT. See `LICENSE`.

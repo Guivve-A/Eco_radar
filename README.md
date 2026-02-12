@@ -1,49 +1,149 @@
 ﻿# EcoAcoustic Sentinel
 
-Desktop application for bird bioacoustic monitoring with a hybrid detection pipeline:
-- Custom species library (few-shot embeddings)
-- Global discovery with BirdNET
+Desktop application for bird bioacoustic monitoring with a hybrid detection pipeline.
+Aplicacion de escritorio para monitoreo bioacustico aviar con un pipeline hibrido.
 
-This repository is prepared for direct use from GitHub on Windows.
+## Espanol
 
-## Main Features
+### Descripcion
 
-- Guided 4-step workflow in UI:
-  1. Audio input/output
-  2. Recording zone
-  3. Detection parameters
-  4. Export formats
-- Hybrid detection strategy:
-  - If custom profiles produce valid hits, those results are prioritized.
-  - If no custom hit is found, BirdNET global discovery can be used.
-- Species profile library:
-  - Create/remove local species profiles from reference audio.
-  - Multi-vector matching for higher precision.
-- Results and monitoring:
-  - Real-time progress and logs.
-  - Summary tab with top species and chart.
-  - Detailed detections table with playback support.
-- Multiple export formats:
+EcoAcoustic Sentinel combina:
+- Biblioteca local de especies (few-shot por embeddings)
+- Descubrimiento global con BirdNET
+
+### Caracteristicas principales
+
+- Flujo guiado en 4 pasos:
+  1. Audio
+  2. Zona
+  3. Parametros
+  4. Exportacion
+- Estrategia hibrida:
+  - Si hay hits validos de perfiles custom, se priorizan esos resultados.
+  - Si no hay hits custom, se puede usar BirdNET global.
+- Biblioteca de perfiles:
+  - Crear/eliminar especies de referencia.
+  - Comparacion multi-vector para mayor precision.
+- Resultados:
+  - Progreso y logs en tiempo real.
+  - Resumen con top especies y grafico.
+  - Tabla de detecciones con reproduccion por segmento.
+- Exportacion en:
   - CSV
   - Raven Table
   - Audacity
   - Kaleidoscope
 
-## Tech Stack
+### Requisitos
 
-- UI: `PySide6`
-- Bioacoustics/ML: `birdnet-analyzer`, `PyTorch`, `TensorFlow`, `torchaudio`
-- Data processing: `numpy`, `pandas`, `scikit-learn`
+- Windows 10/11
+- Python **3.11.x** (obligatorio)
+- Internet para instalacion inicial
 
-## Requirements
+### Inicio rapido
 
-- OS: Windows 10/11
-- Python: **3.11.x** (required)
-- Internet connection for first-time dependency/model setup
+```bat
+git clone https://github.com/Guivve-A/Eco_radar.git
+cd Eco_radar
+start_app.bat
+```
 
-## Install and Run (Quick Start)
+`start_app.bat` hace automaticamente:
+1. Crea/reutiliza `venv`
+2. Configura entorno
+3. Ejecuta `test_install.py`
+4. Abre la app (`main.py`)
 
-From PowerShell or CMD:
+### Instalacion manual
+
+```bat
+setup_env.bat
+call venv\Scripts\activate
+python test_install.py
+python main.py
+```
+
+### Flujo recomendado de uso
+
+1. Selecciona archivo o carpeta de audio.
+2. Elige carpeta de salida.
+3. Configura modo de zona (global o con coordenadas).
+4. Ajusta preset/parametros.
+5. Define formatos de exportacion.
+6. Ejecuta analisis.
+7. Revisa `Resumen`, `Detecciones`, `Biblioteca de Especies` y `Logs`.
+
+### Datos locales
+
+- `output/`: resultados y exportaciones
+- `profiles/`: perfiles locales y metadatos
+
+### Build de ejecutable
+
+```bat
+python build_exe.py
+```
+
+Para instalador:
+1. Instala Inno Setup 6
+2. Ejecuta:
+
+```bat
+build_installer.bat
+```
+
+Salida esperada:
+`dist\EcoAcousticSentinel_Installer_x64.exe`
+
+### Problemas comunes
+
+- Python no soportado:
+  - Instala Python 3.11.x y vuelve a correr `setup_env.bat`.
+- Error en instalacion inicial:
+  - Verifica internet y reintenta `setup_env.bat`.
+- Sin detecciones:
+  - Revisa rutas de audio, formatos soportados, umbrales y modo de zona.
+- Ejecutar local no cambia GitHub:
+  - GitHub solo cambia con `git add`, `git commit` y `git push`.
+
+## English
+
+### Overview
+
+EcoAcoustic Sentinel combines:
+- Local custom species library (few-shot embeddings)
+- Global discovery with BirdNET
+
+### Main features
+
+- Guided 4-step workflow:
+  1. Audio
+  2. Zone
+  3. Parameters
+  4. Export
+- Hybrid strategy:
+  - If custom profile hits are found, those results are prioritized.
+  - If no custom hit is found, BirdNET global discovery can run.
+- Species profile library:
+  - Create/remove local reference species.
+  - Multi-vector matching for higher precision.
+- Results:
+  - Real-time progress and logs.
+  - Summary with top species and chart.
+  - Detections table with segment playback.
+- Export formats:
+  - CSV
+  - Raven Table
+  - Audacity
+  - Kaleidoscope
+
+### Requirements
+
+- Windows 10/11
+- Python **3.11.x** (required)
+- Internet connection for first-time setup
+
+### Quick start
 
 ```bat
 git clone https://github.com/Guivve-A/Eco_radar.git
@@ -53,11 +153,11 @@ start_app.bat
 
 `start_app.bat` automatically:
 1. Creates/reuses `venv`
-2. Runs environment setup
-3. Executes a smoke test (`test_install.py`)
-4. Launches the application (`main.py`)
+2. Sets up dependencies
+3. Runs `test_install.py`
+4. Launches the app (`main.py`)
 
-## Manual Setup
+### Manual setup
 
 ```bat
 setup_env.bat
@@ -66,40 +166,28 @@ python test_install.py
 python main.py
 ```
 
-## Optional GPU Setup
+### Typical workflow
 
-The default setup is CPU-first.
-If you need a GPU build for PyTorch, adjust your environment and install from `requirements-gpu.txt` according to your CUDA setup.
-
-## Typical Workflow
-
-1. Select one audio file or a folder of audio files.
+1. Select an audio file or folder.
 2. Select output folder.
-3. Configure location mode:
-   - Global mode (no location), or
-   - Zone mode (lat/lon and optional metadata)
-4. Tune parameters/preset.
+3. Set zone mode (global or coordinates).
+4. Tune preset/parameters.
 5. Configure export formats.
 6. Start analysis.
-7. Review results in `Summary`, `Detections`, `Species Library`, and `Logs`.
+7. Review `Summary`, `Detections`, `Species Library`, and `Logs`.
 
-## Output and Local Data
+### Local data
 
-- `output/`: generated analysis results and exports
-- `profiles/`: local species embeddings and profile metadata
+- `output/`: analysis outputs and exports
+- `profiles/`: local species profiles and metadata
 
-The repository keeps folder structure with `.gitkeep` files; user-generated artifacts should stay local.
-
-## Build Executable
-
-### Build app (`onedir`)
+### Build executable
 
 ```bat
 python build_exe.py
 ```
 
-### Build installer
-
+For installer:
 1. Install Inno Setup 6
 2. Run:
 
@@ -107,19 +195,19 @@ python build_exe.py
 build_installer.bat
 ```
 
-Expected installer output:
+Expected output:
 `dist\EcoAcousticSentinel_Installer_x64.exe`
 
-## Troubleshooting
+### Troubleshooting
 
-- Error: Python version not supported
+- Unsupported Python version:
   - Install Python 3.11.x and rerun `setup_env.bat`.
-- Error during first install
-  - Ensure internet access and rerun `setup_env.bat`.
-- App opens but no detections
-  - Check input path, supported audio formats, threshold settings, and zone/global mode.
-- Local run does not change GitHub
-  - Local execution affects only your machine unless you explicitly `git add`, `git commit`, and `git push`.
+- First-time setup fails:
+  - Check internet access and rerun `setup_env.bat`.
+- No detections:
+  - Verify audio paths, supported formats, thresholds, and zone mode.
+- Local execution does not change GitHub:
+  - GitHub changes only after `git add`, `git commit`, and `git push`.
 
 ## Scientific Credit
 

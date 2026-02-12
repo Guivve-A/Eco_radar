@@ -5,6 +5,7 @@
 #define MyAppExeName "EcoAcousticSentinel.exe"
 #define BuildRoot "dist\\EcoAcousticSentinel"
 #define BuildExe "dist\\EcoAcousticSentinel\\EcoAcousticSentinel.exe"
+#define SetupIcon "assets\\app.ico"
 
 #ifnexist BuildExe
   #error "No se encontro dist\\EcoAcousticSentinel\\EcoAcousticSentinel.exe. Ejecuta primero: python build_exe.py"
@@ -32,6 +33,9 @@ OutputDir=dist
 OutputBaseFilename=EcoAcousticSentinel_Installer_x64
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes
+#ifexist SetupIcon
+SetupIconFile={#SetupIcon}
+#endif
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"

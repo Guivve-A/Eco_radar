@@ -107,6 +107,9 @@ def build() -> None:
     if (PROJECT_ROOT / "ui_theme.py").exists():
         datas.append((PROJECT_ROOT / "ui_theme.py", "."))
     datas.append((profiles_dir, "profiles"))
+    assets_dir = PROJECT_ROOT / "assets"
+    if assets_dir.exists() and assets_dir.is_dir():
+        datas.append((assets_dir, "assets"))
 
     models_dir = _discover_birdnet_models_dir()
     if models_dir is not None and models_dir.exists():

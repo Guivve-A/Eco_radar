@@ -9,7 +9,7 @@ from statistics import mean
 
 from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QValueAxis
 from PySide6.QtCore import QElapsedTimer, QSettings, Qt, QThread, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -49,6 +49,12 @@ from ui_theme import build_stylesheet
 
 APP_TITLE = "EcoAcoustic Sentinel"
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".wma", ".aiff", ".aif"}
+
+
+def _resource_path(relative_path: str) -> Path:
+    if hasattr(sys, "_MEIPASS"):
+        return Path(getattr(sys, "_MEIPASS")) / relative_path
+    return Path(__file__).resolve().parent / relative_path
 
 
 @dataclass
@@ -176,6 +182,9 @@ class AudioAnalysisWindow(QMainWindow):
 
     def _init_ui(self) -> None:
         self.setWindowTitle(APP_TITLE)
+        icon_path = _resource_path("assets/app.ico")
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.setMinimumSize(1300, 820)
         self.setStyleSheet(build_stylesheet())
 
@@ -1489,6 +1498,9 @@ class AudioAnalysisWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
+    icon_path = _resource_path("assets/app.ico")
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = AudioAnalysisWindow()
     window.show()
     return app.exec()

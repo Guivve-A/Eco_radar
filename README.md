@@ -3,7 +3,7 @@
 Desktop application for bird bioacoustic monitoring with a hybrid detection pipeline.
 Aplicacion de escritorio para monitoreo bioacustico aviar con un pipeline hibrido.
 
-## Espanol
+## Español
 
 ### Descripcion
 

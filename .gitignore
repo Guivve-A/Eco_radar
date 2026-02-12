@@ -1,0 +1,21 @@
+﻿# Python virtual environment
+venv/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Runtime outputs
+output/*
+!output/.gitkeep
+profiles/*.npy
+profiles/*.json
+!profiles/.gitkeep
+
+# Logs
+*.log

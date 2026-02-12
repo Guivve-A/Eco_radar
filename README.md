@@ -77,3 +77,7 @@ El instalador final queda en `dist\EcoAcousticSentinel_Installer_x64.exe`.
 BirdNET (Kahl et al., 2021):
 BirdNET: A deep learning solution for avian diversity monitoring.
 Ecological Informatics, 61, 101236.
+
+## Licencia
+
+MIT. Ver archivo LICENSE.

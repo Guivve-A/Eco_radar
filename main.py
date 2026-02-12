@@ -10,6 +10,7 @@ from statistics import mean
 
 import librosa
 import librosa.display
+import numpy as np
 import soundfile as sf
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -197,35 +198,35 @@ class SpectrogramWidget(QWidget):
         signal = signal.astype("float32", copy=False)
         n_fft = 2048
         hop_length = 256
-        mel_spec = librosa.feature.melspectrogram(
+        stft_matrix = librosa.stft(
             y=signal,
-            sr=sample_rate,
             n_fft=n_fft,
             hop_length=hop_length,
-            n_mels=128,
-            fmin=20,
-            fmax=min(20000, sample_rate // 2),
-            power=2.0,
+            window="hann",
+            center=True,
         )
-        ref_power = float(mel_spec.max()) if mel_spec.size else 1.0
-        if ref_power <= 0.0:
-            ref_power = 1e-6
-        mel_db = librosa.power_to_db(mel_spec, ref=ref_power)
+        magnitude = np.abs(stft_matrix)
+        ref_amp = float(magnitude.max()) if magnitude.size else 1.0
+        if ref_amp <= 0.0:
+            ref_amp = 1e-6
+        spec_db = librosa.amplitude_to_db(magnitude, ref=ref_amp)
 
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         img = librosa.display.specshow(
-            mel_db,
+            spec_db,
             sr=sample_rate,
             hop_length=hop_length,
             x_axis="time",
-            y_axis="mel",
+            y_axis="hz",
             cmap="inferno",
             ax=ax,
         )
         ax.set_xlabel("Tiempo (s)")
-        ax.set_ylabel("Frecuencia (Mel)")
-        ax.set_title(title or "Espectrograma de Mel")
+        ax.set_ylabel("Frecuencia (Hz)")
+        max_plot_hz = min(12000, sample_rate // 2)
+        ax.set_ylim([0, max_plot_hz])
+        ax.set_title(title or "Espectrograma (STFT)")
         self._colorbar = self.figure.colorbar(img, ax=ax, pad=0.01, format="%+2.0f dB")
         self._colorbar.set_label("Intensidad (dB)")
         self.canvas.draw_idle()
